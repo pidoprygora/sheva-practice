@@ -1,0 +1,243 @@
+WITH 
+daily_data AS (
+    SELECT 
+        category,
+        DATE(created_at) AS date,
+        COUNT(*) AS daily_count,
+        AVG(metric) AS daily_avg,
+        SUM(metric) AS daily_sum
+    FROM data_table
+    WHERE created_at >= '2023-01-01'
+    GROUP BY category, DATE(created_at)
+),
+trend AS (
+    SELECT 
+        category,
+        date,
+        daily_count,
+        daily_avg,
+        daily_sum,
+        LAG(daily_sum) OVER (PARTITION BY category ORDER BY date) AS prev_sum,
+        daily_sum - LAG(daily_sum) OVER (PARTITION BY category ORDER BY date) AS diff_sum
+    FROM daily_data
+),
+cumulative AS (
+    SELECT 
+        category,
+        date,
+        daily_sum,
+        SUM(daily_sum) OVER (PARTITION BY category ORDER BY date) AS cumulative_sum
+    FROM daily_data
+)
+SELECT 
+    t.category,
+    t.date,
+    t.daily_sum,
+    t.diff_sum,
+    c.cumulative_sum
+FROM trend t
+JOIN cumulative c ON t.category = c.category AND t.date = c.date
+ORDER BY t.category, t.date;
+
+
+WITH base_data AS (
+    -- Фізичні особи (ФОП)
+    SELECT 
+        p.taxcode AS tax,
+        p.cust_id,
+        CONCAT(p.surname, ' ', p.name, ' ', p.second_name) AS cln_name,
+        'FOP' AS profile_type,
+        cc.status,
+        date_format(cast(p.doc_date_end AS timestamp), '%Y-%m-%d') AS doc_end_date
+    FROM "rbua_data_prod_raw_cmd"."cmd_profile_person" p
+    JOIN "rbua_data_prod_raw_cmd"."cmd_customer" cc ON p.cust_id = cc.id
+    WHERE cc.status = '10' 
+        AND p.taxcode NOT IN ('000000000')
+
+    UNION ALL
+
+    -- Юридичні особи (LE)
+    SELECT 
+        h.reg_code AS tax,
+        h.cust_id,
+        h.name_short AS cln_name,
+        'LE' AS profile_type,
+        cc.status,
+        NULL AS doc_end_date
+    FROM "rbua_data_prod_raw_cmd"."cmd_profile_legal" h
+    JOIN "rbua_data_prod_raw_cmd"."cmd_customer" cc ON h.cust_id = cc.id
+    WHERE cc.status = '10'
+        AND h.reg_code NOT IN ('000000000')
+),
+
+contact_data AS (
+    SELECT 
+        f.cust_id,
+        COALESCE(p.tel_num, '-') AS tel_num,
+        COALESCE(e.email_contact, '-') AS email,
+        CASE WHEN e.is_verified = '1' THEN 'Verified' ELSE 'Not Verified' END AS email_verified
+    FROM base_data f
+    LEFT JOIN "rbua_data_prod_raw_cmd"."cmd_phones" p ON f.cust_id = p.cust_id
+    LEFT JOIN "rbua_data_prod_raw_cmd"."cmd_email" e ON f.cust_id = e.cust_id
+),
+
+risk_scoring AS (
+    SELECT DISTINCT
+        fs.cln_taxcode AS tax,
+        MAX(CASE WHEN fs.sc_type = '200' AND fs.kp_date > '20240327' THEN fs.score ELSE NULL END) AS score_200,
+        MAX(CASE WHEN fs.sc_type = '300' AND fs.kp_date > '20230811' THEN fs.score ELSE NULL END) AS score_300
+    FROM "rbua_data_prod_raw_riskdata"."rdm_finmon_score" fs
+    GROUP BY fs.cln_taxcode
+),
+
+bankruptcy_check AS (
+    SELECT DISTINCT taxcode
+    FROM "rbua_data_prod_raw_cmd"."cmd_cust_edr"
+    WHERE status_name IN ('В стані припинення', 'припинено', 'порушено справу про банкрутство')
+        AND ctime >= date_add('year', -1, current_date)
+),
+
+final_data AS (
+    SELECT 
+        b.tax,
+        b.cust_id,
+        b.cln_name,
+        b.profile_type,
+        c.tel_num,
+        c.email,
+        c.email_verified,
+        r.score_200,
+        r.score_300,
+        CASE WHEN bc.taxcode IS NOT NULL THEN 'At Risk' ELSE 'No Risk' END AS bankruptcy_status,
+        date_format(cast(coalesce(f.ctime, l.ctime) AS timestamp), '%Y-%m') AS registration_month
+    FROM base_data b
+    LEFT JOIN contact_data c ON b.cust_id = c.cust_id
+    LEFT JOIN risk_scoring r ON b.tax = r.tax
+    LEFT JOIN bankruptcy_check bc ON b.tax = bc.taxcode
+    LEFT JOIN "rbua_data_prod_raw_cmd"."cmd_fop" f ON b.cust_id = f.cust_id
+    LEFT JOIN "rbua_data_prod_raw_cmd"."cmd_le" l ON b.cust_id = l.cust_id
+),
+
+final_report AS (
+    SELECT 
+        registration_month,
+        profile_type,
+        COUNT(DISTINCT cust_id) AS total_clients,
+        SUM(CASE WHEN bankruptcy_status = 'At Risk' THEN 1 ELSE 0 END) AS risky_clients,
+        SUM(CASE WHEN score_200 IS NOT NULL AND score_200 < 493 THEN 1 ELSE 0 END) AS low_risk_clients,
+        SUM(CASE WHEN score_200 IS NOT NULL AND score_200 >= 493 THEN 1 ELSE 0 END) AS high_risk_clients,
+        SUM(CASE WHEN email_verified = 'Verified' THEN 1 ELSE 0 END) AS verified_emails
+    FROM final_data
+    GROUP BY registration_month, profile_type
+    ORDER BY registration_month DESC
+)
+
+SELECT * FROM final_report;
+
+
+WITH base_data AS (
+    -- Фізичні особи (ФОП)
+    SELECT 
+        p.taxcode AS tax,
+        p.cust_id,
+        CONCAT(p.surname, ' ', p.name, ' ', p.second_name) AS cln_name,
+        'FOP' AS profile_type,
+        cc.status,
+        date_format(cast(p.doc_date_end AS timestamp), '%Y-%m-%d') AS doc_end_date
+    FROM "rbua_data_prod_raw_cmd"."cmd_profile_person" p
+    JOIN "rbua_data_prod_raw_cmd"."cmd_customer" cc ON p.cust_id = cc.id
+    WHERE cc.status = '10' 
+        AND p.taxcode NOT IN ('0000000000')
+
+    UNION ALL
+
+    -- Юридичні особи
+    SELECT 
+        h.reg_code AS tax,
+        h.cust_id,
+        h.name_short AS cln_name,
+        'LE' AS profile_type,
+        cc.status,
+        NULL AS doc_end_date
+    FROM "rbua_data_prod_raw_cmd"."cmd_profile_legal" h
+    JOIN "rbua_data_prod_raw_cmd"."cmd_customer" cc ON h.cust_id = cc.id
+),
+
+processed_data AS (
+    -- Додавання контактної інформації
+    SELECT 
+        b.tax,
+        b.cust_id,
+        b.cln_name,
+        e.info AS email,
+        CASE WHEN e.is_verified = 1 THEN 'verified' ELSE 'not_verified' END AS email_verified,
+        p.tel_num,
+        CASE WHEN p.tel_num IS NOT NULL THEN '+' ELSE '-' END AS has_phone,
+        b.profile_type,
+        date_format(coalesce(f.ctime, l.ctime), '%Y-%m') AS ctime
+    FROM base_data b
+    LEFT JOIN "rbua_data_prod_raw_cmd"."cmd_cust_echannel" e ON b.tax = e.cust_id
+    LEFT JOIN "rbua_data_prod_raw_cmd"."phones_final" p ON b.cust_id = p.cust_id
+    LEFT JOIN "rbua_data_prod_raw_cmd"."cmd_profile_person" f ON b.cust_id = f.cust_id
+    LEFT JOIN "rbua_data_prod_raw_cmd"."cmd_profile_legal" l ON b.cust_id = l.cust_id
+),
+
+financial_risk AS (
+    -- Фінансовий скоринг
+    SELECT 
+        fs.cln_taxcode AS taxcode,
+        MAX(CASE WHEN fs.sc_type = '200' AND k.kp_date >= '20240327' THEN fs.score ELSE NULL END) AS risk_200,
+        MAX(CASE WHEN fs.sc_type = '300' AND k.kp_date >= '20230811' THEN fs.score ELSE NULL END) AS risk_300
+    FROM "rbua_data_prod_raw_riskdata"."rdm_finmon_score" fs
+    JOIN "rbua_data_prod_raw_riskdata"."rdm_finmon_score" k ON fs.cln_taxcode = k.cln_taxcode
+    WHERE fs.sc_type IN ('200', '300')
+    GROUP BY fs.cln_taxcode
+),
+
+edr_closed AS (
+    -- Статус банкрутства
+    SELECT DISTINCT 
+        taxcode
+    FROM "rbua_data_prod_raw_cmd"."cmd_cust_edr"
+    WHERE status_name IN ('В стані припинення', 'припинено', 'порушено справу про банкрутство')
+        AND ctime >= date_add('day', -365, current_date)
+),
+
+final_data AS (
+    SELECT 
+        pd.tax,
+        pd.cust_id,
+        pd.cln_name,
+        pd.email,
+        pd.email_verified,
+        pd.tel_num,
+        pd.has_phone,
+        pd.profile_type,
+        pd.ctime,
+        fr.risk_200,
+        fr.risk_300,
+        CASE WHEN ec.taxcode IS NOT NULL THEN 'Closed' ELSE 'Active' END AS edr_status
+    FROM processed_data pd
+    LEFT JOIN financial_risk fr ON pd.tax = fr.taxcode
+    LEFT JOIN edr_closed ec ON pd.tax = ec.taxcode
+),
+
+reporting_periods AS (
+    SELECT DISTINCT
+        date_format(date_add('month', i, current_date), '%Y-%m') AS report_month
+    FROM unnest(sequence(-24, 0)) AS t(i) -- 24 місяці назад
+)
+
+SELECT 
+    rp.report_month,
+    COUNT(fd.cust_id) AS total_clients,
+    COUNT(CASE WHEN fd.profile_type = 'FOP' THEN fd.cust_id ELSE NULL END) AS total_fop,
+    COUNT(CASE WHEN fd.profile_type = 'LE' THEN fd.cust_id ELSE NULL END) AS total_le,
+    COUNT(CASE WHEN fd.edr_status = 'Closed' THEN fd.cust_id ELSE NULL END) AS closed_clients
+FROM reporting_periods rp
+LEFT JOIN final_data fd ON fd.ctime = rp.report_month
+GROUP BY rp.report_month
+ORDER BY rp.report_month DESC;
+
+
+
