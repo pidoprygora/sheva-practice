@@ -1,0 +1,596 @@
+WITH 
+base_data AS (
+    SELECT 
+        id,
+        created_at,
+        updated_at,
+        metric,
+        category,
+        DATE(created_at) AS date,
+        EXTRACT(YEAR FROM created_at) AS year,
+        EXTRACT(MONTH FROM created_at) AS month,
+        EXTRACT(WEEK FROM created_at) AS week,
+        EXTRACT(DAY FROM created_at) AS day
+    FROM data_table
+    WHERE created_at >= '2023-01-01'
+),
+ranked_data AS (
+    SELECT 
+        id,
+        metric,
+        category,
+        created_at,
+        ROW_NUMBER() OVER (PARTITION BY category ORDER BY created_at) AS rn
+    FROM base_data
+),
+aggregated_category AS (
+    SELECT 
+        category,
+        AVG(metric) AS avg_metric,
+        MIN(metric) AS min_metric,
+        MAX(metric) AS max_metric,
+        COUNT(*) AS total_records
+    FROM base_data
+    GROUP BY category
+),
+detailed_data AS (
+    SELECT 
+        b.id,
+        b.created_at,
+        b.updated_at,
+        b.metric,
+        b.category,
+        b.date,
+        b.year,
+        b.month,
+        b.week,
+        b.day,
+        r.rn,
+        a.avg_metric,
+        a.min_metric,
+        a.max_metric,
+        a.total_records
+    FROM base_data b
+    JOIN ranked_data r ON b.id = r.id
+    JOIN aggregated_category a ON b.category = a.category
+),
+performance_data AS (
+    SELECT 
+        id,
+        created_at,
+        updated_at,
+        metric,
+        category,
+        rn,
+        avg_metric,
+        min_metric,
+        max_metric,
+        total_records,
+        CASE 
+            WHEN metric > avg_metric THEN 'Above Average'
+            WHEN metric = avg_metric THEN 'Average'
+            ELSE 'Below Average'
+        END AS performance
+    FROM detailed_data
+),
+monthly_aggregation AS (
+    SELECT 
+        category,
+        year,
+        month,
+        COUNT(*) AS monthly_count,
+        AVG(metric) AS monthly_avg,
+        SUM(metric) AS monthly_sum
+    FROM base_data
+    GROUP BY category, year, month
+),
+weekly_aggregation AS (
+    SELECT 
+        category,
+        year,
+        week,
+        COUNT(*) AS weekly_count,
+        AVG(metric) AS weekly_avg,
+        SUM(metric) AS weekly_sum
+    FROM base_data
+    GROUP BY category, year, week
+),
+daily_aggregation AS (
+    SELECT 
+        category,
+        date,
+        COUNT(*) AS daily_count,
+        AVG(metric) AS daily_avg,
+        SUM(metric) AS daily_sum
+    FROM base_data
+    GROUP BY category, date
+),
+trend_analysis AS (
+    SELECT 
+        m.category,
+        m.year,
+        m.month,
+        m.monthly_avg,
+        m.monthly_sum,
+        LAG(m.monthly_avg) OVER (PARTITION BY m.category ORDER BY m.year, m.month) AS prev_month_avg,
+        CASE
+            WHEN LAG(m.monthly_avg) OVER (PARTITION BY m.category ORDER BY m.year, m.month) IS NULL THEN NULL
+            ELSE m.monthly_avg - LAG(m.monthly_avg) OVER (PARTITION BY m.category ORDER BY m.year, m.month)
+        END AS diff_avg
+    FROM monthly_aggregation m
+),
+cumulative_metrics AS (
+    SELECT 
+        category,
+        date,
+        daily_count,
+        daily_avg,
+        SUM(daily_sum) OVER (PARTITION BY category ORDER BY date) AS cumulative_sum,
+        SUM(daily_count) OVER (PARTITION BY category ORDER BY date) AS cumulative_count
+    FROM daily_aggregation
+),
+percentile_calculations AS (
+    SELECT 
+        category,
+        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY metric) OVER (PARTITION BY category) AS pct25,
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY metric) OVER (PARTITION BY category) AS median,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric) OVER (PARTITION BY category) AS pct75,
+        metric
+    FROM base_data
+),
+statistics_summary AS (
+    SELECT 
+        category,
+        MIN(metric) AS min_metric,
+        MAX(metric) AS max_metric,
+        AVG(metric) AS avg_metric,
+        STDDEV(metric) AS stddev_metric
+    FROM base_data
+    GROUP BY category
+),
+outlier_detection AS (
+    SELECT 
+        b.id,
+        b.metric,
+        s.avg_metric,
+        s.stddev_metric,
+        CASE
+            WHEN ABS(b.metric - s.avg_metric) > 2 * s.stddev_metric THEN 'Outlier'
+            ELSE 'Normal'
+        END AS outlier_flag
+    FROM base_data b
+    JOIN statistics_summary s ON b.category = s.category
+),
+normalized_data AS (
+    SELECT 
+        b.id,
+        b.created_at,
+        b.updated_at,
+        b.metric,
+        b.category,
+        (b.metric - s.avg_metric) / s.stddev_metric AS normalized_metric
+    FROM base_data b
+    JOIN statistics_summary s ON b.category = s.category
+),
+detailed_normalization AS (
+    SELECT 
+        d.id,
+        d.created_at,
+        d.updated_at,
+        d.metric,
+        d.category,
+        d.rn,
+        d.avg_metric,
+        d.min_metric,
+        d.max_metric,
+        d.total_records,
+        p.performance,
+        m.monthly_count,
+        m.monthly_avg,
+        m.monthly_sum,
+        w.weekly_count,
+        w.weekly_avg,
+        w.weekly_sum,
+        d.date,
+        d.year,
+        d.month,
+        d.week,
+        d.day
+    FROM detailed_data d
+    LEFT JOIN monthly_aggregation m ON d.category = m.category AND d.year = m.year AND d.month = m.month
+    LEFT JOIN weekly_aggregation w ON d.category = w.category AND d.year = w.year AND d.week = w.week
+    LEFT JOIN performance_data p ON d.id = p.id
+),
+final_join AS (
+    SELECT 
+        dn.id,
+        dn.created_at,
+        dn.updated_at,
+        dn.metric,
+        dn.category,
+        dn.rn,
+        dn.avg_metric,
+        dn.min_metric,
+        dn.max_metric,
+        dn.total_records,
+        dn.date,
+        dn.year,
+        dn.month,
+        dn.week,
+        dn.day,
+        t.diff_avg,
+        c.cumulative_sum,
+        c.cumulative_count,
+        pcts.pct25,
+        pcts.median,
+        pcts.pct75,
+        o.outlier_flag,
+        nd.normalized_metric
+    FROM detailed_normalization dn
+    LEFT JOIN trend_analysis t ON dn.category = t.category AND dn.year = t.year AND dn.month = t.month
+    LEFT JOIN cumulative_metrics c ON dn.category = c.category AND dn.date = c.date
+    LEFT JOIN percentile_calculations pcts ON dn.category = pcts.category AND dn.metric = pcts.metric
+    LEFT JOIN outlier_detection o ON dn.id = o.id
+    LEFT JOIN normalized_data nd ON dn.id = nd.id
+),
+comparison_data AS (
+    SELECT 
+        category,
+        COUNT(*) AS record_count,
+        SUM(metric) AS total_metric,
+        AVG(metric) AS overall_avg
+    FROM base_data
+    GROUP BY category
+),
+moving_average_7day AS (
+    SELECT 
+        category,
+        date,
+        AVG(daily_sum) OVER (PARTITION BY category ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma_7day
+    FROM daily_aggregation
+),
+moving_average_30day AS (
+    SELECT 
+        category,
+        date,
+        AVG(daily_sum) OVER (PARTITION BY category ORDER BY date ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) AS ma_30day
+    FROM daily_aggregation
+),
+volatility_analysis AS (
+    SELECT 
+        category,
+        date,
+        STDDEV(daily_sum) OVER (PARTITION BY category ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS vol_7day,
+        STDDEV(daily_sum) OVER (PARTITION BY category ORDER BY date ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) AS vol_30day
+    FROM daily_aggregation
+),
+trend_comparison AS (
+    SELECT 
+        t.category,
+        t.year,
+        t.month,
+        t.monthly_avg,
+        t.diff_avg,
+        CASE
+            WHEN t.diff_avg > 0 THEN 'Increasing'
+            WHEN t.diff_avg = 0 THEN 'Stable'
+            ELSE 'Decreasing'
+        END AS trend
+    FROM trend_analysis t
+),
+seasonal_adjustment AS (
+    SELECT 
+        category,
+        month,
+        AVG(monthly_avg) AS seasonal_factor
+    FROM monthly_aggregation
+    GROUP BY category, month
+),
+growth_rate AS (
+    SELECT 
+        category,
+        year,
+        month,
+        CASE
+            WHEN LAG(monthly_sum) OVER (PARTITION BY category ORDER BY year, month) IS NULL THEN NULL
+            ELSE (monthly_sum - LAG(monthly_sum) OVER (PARTITION BY category ORDER BY year, month)) / LAG(monthly_sum) OVER (PARTITION BY category ORDER BY year, month)
+        END AS growth_rate
+    FROM monthly_aggregation
+),
+projection_forecast AS (
+    SELECT 
+        m.category,
+        m.year,
+        m.month,
+        m.monthly_sum,
+        g.growth_rate,
+        m.monthly_sum * (1 + COALESCE(g.growth_rate, 0)) AS forecast_next_month
+    FROM monthly_aggregation m
+    LEFT JOIN growth_rate g ON m.category = g.category AND m.year = g.year AND m.month = g.month
+),
+category_performance_summary AS (
+    SELECT 
+        p.category,
+        COUNT(*) AS total_entries,
+        AVG(metric) AS overall_avg_metric,
+        SUM(CASE WHEN performance = 'Above Average' THEN 1 ELSE 0 END) AS above_avg_count,
+        SUM(CASE WHEN performance = 'Average' THEN 1 ELSE 0 END) AS avg_count,
+        SUM(CASE WHEN performance = 'Below Average' THEN 1 ELSE 0 END) AS below_avg_count
+    FROM performance_data p
+    GROUP BY p.category
+),
+extended_daily AS (
+    SELECT 
+        d.category,
+        d.date,
+        d.daily_count,
+        d.daily_avg,
+        d.daily_sum,
+        ma7.ma_7day,
+        ma30.ma_30day
+    FROM daily_aggregation d
+    LEFT JOIN moving_average_7day ma7 ON d.category = ma7.category AND d.date = ma7.date
+    LEFT JOIN moving_average_30day ma30 ON d.category = ma30.category AND d.date = ma30.date
+),
+rolling_statistics AS (
+    SELECT 
+        d.category,
+        d.date,
+        d.daily_sum,
+        AVG(d.daily_sum) OVER (PARTITION BY d.category ORDER BY d.date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS rolling_avg_14,
+        STDDEV(d.daily_sum) OVER (PARTITION BY d.category ORDER BY d.date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS rolling_stddev_14
+    FROM daily_aggregation d
+),
+anomaly_detection AS (
+    SELECT 
+        r.category,
+        r.date,
+        r.daily_sum,
+        rs.rolling_avg_14,
+        rs.rolling_stddev_14,
+        CASE
+            WHEN ABS(r.daily_sum - rs.rolling_avg_14) > 3 * rs.rolling_stddev_14 THEN 'Anomaly'
+            ELSE 'Normal'
+        END AS anomaly_flag
+    FROM daily_aggregation r
+    JOIN rolling_statistics rs ON r.category = rs.category AND r.date = rs.date
+),
+temporal_trend AS (
+    SELECT 
+        category,
+        MIN(date) AS start_date,
+        MAX(date) AS end_date,
+        DATEDIFF(MAX(date), MIN(date)) AS period_days
+    FROM base_data
+    GROUP BY category
+),
+performance_over_time AS (
+    SELECT 
+        p.category,
+        p.date,
+        p.performance,
+        ed.ma_7day,
+        ed.ma_30day,
+        ad.anomaly_flag
+    FROM extended_daily ed
+    JOIN performance_data p ON ed.category = p.category AND ed.date = p.date
+    LEFT JOIN anomaly_detection ad ON ed.category = ad.category AND ed.date = ad.date
+),
+forecast_summary AS (
+    SELECT 
+        m.category,
+        m.year,
+        m.month,
+        m.monthly_sum,
+        g.growth_rate,
+        m.monthly_sum * (1 + COALESCE(g.growth_rate, 0)) AS forecast_next_month
+    FROM monthly_aggregation m
+    LEFT JOIN growth_rate g ON m.category = g.category AND m.year = g.year AND m.month = g.month
+),
+final_results AS (
+    SELECT 
+        fj.id,
+        fj.created_at,
+        fj.updated_at,
+        fj.metric,
+        fj.category,
+        fj.rn,
+        fj.avg_metric,
+        fj.min_metric,
+        fj.max_metric,
+        fj.total_records
+    FROM final_join fj
+    LEFT JOIN trend_analysis t ON fj.category = t.category AND fj.year = t.year AND fj.month = t.month
+    LEFT JOIN cumulative_metrics c ON fj.category = c.category AND fj.date = c.date
+    LEFT JOIN percentile_calculations pcts ON fj.category = pcts.category AND fj.metric = pcts.metric
+    LEFT JOIN outlier_detection o ON fj.id = o.id
+    LEFT JOIN normalized_data nd ON fj.id = nd.id
+    LEFT JOIN comparison_data comp ON fj.category = comp.category
+),
+final_output AS (
+    SELECT
+        fr.id AS record_id,
+        fr.created_at,
+        fr.updated_at,
+        fr.metric,
+        fr.category,
+        fr.rn,
+        fr.avg_metric,
+        fr.min_metric,
+        fr.max_metric,
+        fr.total_records,
+        fr.date,
+        fr.year,
+        fr.month,
+        fr.week,
+        fr.day,
+        t.diff_avg AS monthly_diff,
+        c.cumulative_sum,
+        c.cumulative_count,
+        pcts.pct25,
+        pcts.median,
+        pcts.pct75,
+        o.outlier_flag,
+        nd.normalized_metric,
+        comp.record_count,
+        comp.total_metric,
+        comp.overall_avg,
+        ma7.ma_7day,
+        ma30.ma_30day,
+        vol.vol_7day,
+        vol.vol_30day,
+        tc.trend,
+        sa.seasonal_factor,
+        gf.growth_rate,
+        pf.forecast_next_month,
+        cps.total_entries,
+        cps.overall_avg_metric,
+        cps.above_avg_count,
+        cps.avg_count,
+        cps.below_avg_count,
+        CASE WHEN fr.metric > fr.avg_metric THEN 'Positive' ELSE 'Negative' END AS metric_sign,
+        CASE WHEN fr.rn % 2 = 0 THEN 'Even' ELSE 'Odd' END AS row_parity,
+        CASE WHEN fr.year = EXTRACT(YEAR FROM CURRENT_DATE) THEN 'Current Year' ELSE 'Past Year' END AS year_status,
+        CASE 
+            WHEN fr.month BETWEEN 1 AND 3 THEN 'Q1'
+            WHEN fr.month BETWEEN 4 AND 6 THEN 'Q2'
+            WHEN fr.month BETWEEN 7 AND 9 THEN 'Q3'
+            ELSE 'Q4'
+        END AS quarter,
+        CONCAT(fr.category, '-', fr.id) AS composite_key,
+        CASE WHEN nd.normalized_metric IS NOT NULL THEN ROUND(nd.normalized_metric, 2) ELSE NULL END AS normalized_round,
+        CASE WHEN pcts.median IS NOT NULL THEN ROUND(pcts.median, 2) ELSE NULL END AS median_round,
+        CASE WHEN vol.vol_7day IS NOT NULL THEN ROUND(vol.vol_7day, 2) ELSE NULL END AS vol_7day_round,
+        CASE WHEN vol.vol_30day IS NOT NULL THEN ROUND(vol.vol_30day, 2) ELSE NULL END AS vol_30day_round,
+        CASE WHEN tc.trend = 'Increasing' THEN 'Upward' ELSE 'Downward' END AS trend_direction,
+        CASE WHEN sa.seasonal_factor IS NOT NULL THEN ROUND(sa.seasonal_factor, 2) ELSE NULL END AS seasonal_round,
+        CASE WHEN gf.growth_rate IS NOT NULL THEN ROUND(gf.growth_rate, 4) ELSE NULL END AS growth_rate_round,
+        CASE WHEN pf.forecast_next_month IS NOT NULL THEN ROUND(pf.forecast_next_month, 2) ELSE NULL END AS forecast_round,
+        CASE WHEN cps.overall_avg_metric IS NOT NULL THEN ROUND(cps.overall_avg_metric, 2) ELSE NULL END AS overall_avg_round,
+        CASE WHEN ra.daily_revenue IS NOT NULL THEN ra.daily_revenue ELSE 0 END AS revenue_value,
+        CASE WHEN ca.daily_cost IS NOT NULL THEN ca.daily_cost ELSE 0 END AS cost_value,
+        CASE WHEN pm.profit_margin IS NOT NULL THEN ROUND(pm.profit_margin, 4) ELSE NULL END AS profit_margin_round,
+        CASE WHEN rb.region IS NOT NULL THEN rb.region ELSE 'Unknown' END AS region_info,
+        CASE WHEN tsf.diff_7day IS NOT NULL THEN tsf.diff_7day ELSE 0 END AS diff_7day_value,
+        CASE WHEN ra2.risk_level = 'High Risk' THEN 'Alert' ELSE 'Normal' END AS risk_alert,
+        fr.id * 2 AS doubled_id,
+        fr.metric / NULLIF(fr.avg_metric, 0) AS metric_ratio,
+        CASE WHEN fr.total_records > 100 THEN 'Large' ELSE 'Small' END AS size_category,
+        EXTRACT(DAY FROM fr.created_at) AS created_day,
+        EXTRACT(MONTH FROM fr.created_at) AS created_month,
+        EXTRACT(YEAR FROM fr.created_at) AS created_year,
+        DATE_PART('hour', fr.created_at) AS created_hour,
+        DATE_PART('minute', fr.created_at) AS created_minute,
+        DATE_PART('second', fr.created_at) AS created_second,
+        CASE WHEN fr.updated_at > fr.created_at THEN 'Updated' ELSE 'Not Updated' END AS update_status,
+        CURRENT_DATE AS current_date,
+        CURRENT_TIME AS current_time,
+        CONCAT(fr.category, '_', TO_CHAR(fr.created_at, 'YYYYMMDD')) AS category_date_key,
+        CASE WHEN fr.metric > 0 THEN 'Positive Metric' ELSE 'Non-positive Metric' END AS metric_description,
+        LENGTH(fr.category) AS category_length,
+        UPPER(fr.category) AS category_upper,
+        LOWER(fr.category) AS category_lower,
+        CASE WHEN fr.category LIKE 'A%' THEN 'Starts with A' ELSE 'Other' END AS category_start,
+        CASE WHEN fr.date < CURRENT_DATE THEN 'Past' ELSE 'Future' END AS temporal_status,
+        EXTRACT(DAY FROM CURRENT_DATE) AS current_day,
+        EXTRACT(MONTH FROM CURRENT_DATE) AS current_month,
+        EXTRACT(YEAR FROM CURRENT_DATE) AS current_year,
+        CASE WHEN fr.year = current_year THEN 'This Year' ELSE 'Previous Years' END AS year_comparison,
+        fr.rn + 100 AS adjusted_row,
+        CASE WHEN fr.rn % 5 = 0 THEN 'Multiple of Five' ELSE 'Not Multiple' END AS multiple_of_five,
+        COALESCE(nd.normalized_metric, 0) AS normalized_default,
+        COALESCE(pcts.pct25, 0) AS pct25_default,
+        COALESCE(pcts.median, 0) AS median_default,
+        COALESCE(pcts.pct75, 0) AS pct75_default,
+        ROUND(fr.metric * 1.1, 2) AS metric_increased,
+        ROUND(fr.metric * 0.9, 2) AS metric_decreased,
+        CASE WHEN fr.total_records = 0 THEN 0 ELSE fr.metric / fr.total_records END AS per_record_metric,
+        CASE WHEN comp.overall_avg > 50 THEN 'High Average' ELSE 'Low Average' END AS avg_label,
+        CASE WHEN fr.rn < 10 THEN 'Top 10' ELSE 'Below Top 10' END AS ranking_label,
+        CASE WHEN fr.metric > ma7.ma_7day THEN 'Above 7-day MA' ELSE 'Below 7-day MA' END AS ma7_comparison,
+        CASE WHEN fr.metric > ma30.ma_30day THEN 'Above 30-day MA' ELSE 'Below 30-day MA' END AS ma30_comparison,
+        CASE WHEN fr.metric BETWEEN pcts.pct25 AND pcts.median THEN 'Between 25th and 50th' ELSE 'Outside Range' END AS percentile_range,
+        CASE WHEN fr.metric BETWEEN pcts.median AND pcts.pct75 THEN 'Between 50th and 75th' ELSE 'Outside Range' END AS percentile_range_high,
+        CASE WHEN fr.metric = pcts.median THEN 'At Median' ELSE 'Not at Median' END AS median_match,
+        CASE WHEN fr.metric > 100 THEN 'High Value' ELSE 'Normal Value' END AS value_label,
+        ROUND(COALESCE(fr.metric, 0) / NULLIF(fr.total_records, 0), 2) AS metric_per_record,
+        CASE WHEN fr.rn = 1 THEN 'First' WHEN fr.rn = comp.record_count THEN 'Last' ELSE 'Middle' END AS position_label,
+        CASE WHEN fr.metric > nd.normalized_metric THEN 'Above Normalized' ELSE 'Below Normalized' END AS normalized_comparison,
+        CASE WHEN comp.total_metric > 1000 THEN 'Bulk' ELSE 'Light' END AS bulk_indicator,
+        ROUND((fr.metric + comp.overall_avg) / 2, 2) AS average_of_metric,
+        CASE WHEN fr.metric > 50 THEN 'Good' ELSE 'Bad' END AS quality_indicator,
+        CASE WHEN fr.total_records > 10 THEN 'Frequent' ELSE 'Rare' END AS frequency_label,
+        CASE WHEN fr.metric > ma7.ma_7day AND fr.metric > ma30.ma_30day THEN 'Consistently High' ELSE 'Inconsistent' END AS consistency_flag,
+        CASE WHEN fr.metric IS NULL THEN 'Missing' ELSE 'Present' END AS metric_presence,
+        CASE WHEN fr.category IS NULL THEN 'No Category' ELSE fr.category END AS category_defined,
+        CASE WHEN fr.updated_at > fr.created_at THEN 'Updated Record' ELSE 'New Record' END AS record_status,
+        CASE WHEN EXTRACT(HOUR FROM fr.created_at) < 12 THEN 'Morning' ELSE 'Afternoon' END AS part_of_day,
+        CASE WHEN EXTRACT(HOUR FROM fr.created_at) BETWEEN 12 AND 18 THEN 'Daytime' ELSE 'Nighttime' END AS time_period,
+        ROUND(fr.metric * 0.05, 2) AS five_percent_metric,
+        ROUND(fr.metric * 0.1, 2) AS ten_percent_metric,
+        ROUND(fr.metric * 0.15, 2) AS fifteen_percent_metric,
+        CASE WHEN fr.metric > 0 THEN LOG(fr.metric) ELSE 0 END AS log_metric,
+        CASE WHEN fr.metric > 0 THEN EXP(fr.metric) ELSE 0 END AS exp_metric,
+        CASE WHEN fr.metric > 0 THEN SQRT(fr.metric) ELSE 0 END AS sqrt_metric,
+        CASE WHEN fr.metric > 0 THEN POWER(fr.metric, 2) ELSE 0 END AS squared_metric,
+        CASE WHEN fr.metric > 0 THEN POWER(fr.metric, 3) ELSE 0 END AS cubed_metric,
+        CASE WHEN fr.metric > 0 THEN ROUND(fr.metric / 3, 2) ELSE 0 END AS third_metric,
+        CASE WHEN fr.metric > 0 THEN ROUND(fr.metric * 3, 2) ELSE 0 END AS triple_metric,
+        CASE WHEN fr.metric > 0 THEN MOD(fr.metric, 10) ELSE 0 END AS metric_mod_10,
+        CASE WHEN fr.metric > 0 THEN fr.metric - (fr.metric * 0.1) ELSE 0 END AS metric_after_discount,
+        CASE WHEN fr.metric > 0 THEN fr.metric + (fr.metric * 0.1) ELSE 0 END AS metric_after_markup,
+        CASE WHEN comp.overall_avg > 0 THEN ROUND(comp.total_metric / comp.record_count, 2) ELSE 0 END AS avg_metric_per_category,
+        CASE WHEN cps.above_avg_count > 0 THEN ROUND(cps.above_avg_count * 1.0 / cps.total_entries, 2) ELSE 0 END AS above_avg_ratio,
+        CASE WHEN cps.avg_count > 0 THEN ROUND(cps.avg_count * 1.0 / cps.total_entries, 2) ELSE 0 END AS avg_ratio,
+        CASE WHEN cps.below_avg_count > 0 THEN ROUND(cps.below_avg_count * 1.0 / cps.total_entries, 2) ELSE 0 END AS below_avg_ratio,
+        CASE WHEN fr.metric > pcts.median THEN 'Above Median' ELSE 'Below Median' END AS median_comparison,
+        CASE WHEN fr.metric > pcts.pct75 THEN 'Above 75th Percentile' ELSE 'Below 75th Percentile' END AS percentile_comparison,
+        CASE WHEN fr.metric > 0 THEN ROUND((fr.metric - pcts.pct25) / NULLIF(pcts.pct75 - pcts.pct25,0), 2) ELSE 0 END AS normalized_range_ratio,
+        CASE WHEN comp.total_metric > 0 THEN ROW_NUMBER() OVER (PARTITION BY fr.category ORDER BY fr.metric DESC) ELSE 0 END AS rank_within_category,
+        CASE WHEN comp.total_metric > 0 THEN RANK() OVER (PARTITION BY fr.category ORDER BY fr.metric DESC) ELSE 0 END AS dense_rank_within_category,
+        CASE WHEN comp.total_metric > 0 THEN NTILE(4) OVER (PARTITION BY fr.category ORDER BY fr.metric) ELSE 0 END AS quartile,
+        CASE WHEN comp.total_metric > 0 THEN CUME_DIST() OVER (PARTITION BY fr.category ORDER BY fr.metric) ELSE 0 END AS cumulative_distribution,
+        CASE WHEN comp.total_metric > 0 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY fr.category ORDER BY fr.metric), 2) ELSE 0 END AS percent_rank,
+        CASE WHEN fr.metric > 0 THEN ROUND(SUM(fr.metric) OVER (PARTITION BY fr.category ORDER BY fr.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 2) ELSE 0 END AS running_total_metric,
+        CASE WHEN fr.metric > 0 THEN ROUND(AVG(fr.metric) OVER (PARTITION BY fr.category ORDER BY fr.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 2) ELSE 0 END AS running_avg_metric,
+        CASE WHEN fr.metric > 0 THEN ROW_NUMBER() OVER (ORDER BY fr.created_at) ELSE 0 END AS global_row_number,
+        CASE WHEN fr.metric > 0 THEN RANK() OVER (ORDER BY fr.created_at) ELSE 0 END AS global_rank,
+        CASE WHEN fr.metric > 0 THEN DENSE_RANK() OVER (ORDER BY fr.created_at) ELSE 0 END AS global_dense_rank,
+        CASE WHEN fr.metric > 0 THEN NTILE(10) OVER (ORDER BY fr.created_at) ELSE 0 END AS decile,
+        CASE WHEN fr.metric > 0 THEN CUME_DIST() OVER (ORDER BY fr.created_at) ELSE 0 END AS global_cume_dist,
+        CASE WHEN fr.metric > 0 THEN PERCENT_RANK() OVER (ORDER BY fr.created_at) ELSE 0 END AS global_percent_rank,
+        ROUND(AVG(fr.metric) OVER (), 2) AS overall_avg_metric_overall,
+        CURRENT_TIMESTAMP AS query_timestamp,
+        CURRENT_USER AS query_user,
+        'Final Output' AS output_label,
+        CASE WHEN fr.category = 'A' THEN 'Alpha' WHEN fr.category = 'B' THEN 'Beta' ELSE 'Other' END AS category_group,
+        CASE WHEN fr.metric > 50 THEN 'High Metric' ELSE 'Low Metric' END AS metric_level,
+        CASE WHEN fr.total_records > 500 THEN 'High Volume' ELSE 'Low Volume' END AS volume_indicator,
+        CASE WHEN fr.created_at < CURRENT_DATE THEN 'Historical' ELSE 'Recent' END AS record_age,
+        CASE WHEN fr.updated_at IS NOT NULL THEN 'Updated' ELSE 'Not Updated' END AS update_flag,
+        ROUND(fr.metric * 1.05, 2) AS metric_increase_5,
+        ROUND(fr.metric * 0.95, 2) AS metric_decrease_5,
+        ROUND(fr.metric * 1.10, 2) AS metric_increase_10,
+        ROUND(fr.metric * 0.90, 2) AS metric_decrease_10,
+        fr.metric * 2 AS metric_doubled,
+        fr.metric / 2 AS metric_halved,
+        fr.metric + 100 AS metric_plus_100,
+        fr.metric - 100 AS metric_minus_100,
+        ROUND(fr.metric / NULLIF(fr.total_records, 0), 2) AS avg_metric_per_record,
+        ROUND((fr.metric - fr.min_metric) / NULLIF(fr.max_metric - fr.min_metric, 0), 2) AS normalized_metric_ratio,
+        ABS(fr.metric - fr.avg_metric) AS metric_deviation,
+        ROUND((fr.metric - fr.avg_metric) / NULLIF(fr.avg_metric, 0), 2) AS percent_deviation,
+        COALESCE(nd.normalized_metric, 0) * 100 AS normalized_percentage,
+        COALESCE(ma7.ma_7day, 0) * 100 AS ma7_percentage,
+        COALESCE(ma30.ma_30day, 0) * 100 AS ma30_percentage,
+        ROUND(POWER(fr.metric, 0.5), 2) AS sqrt_metric_calc,
+        ROUND(POWER(fr.metric, 2), 2) AS square_metric_calc,
+        ROUND(POWER(fr.metric, 3), 2) AS cube_metric_calc,
+        ROUND(LOG(fr.metric), 2) AS log_metric_calc,
+        ROUND(EXP(fr.metric), 2) AS exp_metric_calc,
+        ROUND(SQRT(fr.metric), 2) AS sqrt_metric_repeat_calc
+    FROM final_results fr
+)
+SELECT *
+FROM final_output
+ORDER BY category, date;
